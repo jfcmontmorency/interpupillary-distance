@@ -48,6 +48,11 @@
           <span class="input-unit"><input id="distanceCm" type="number" min="20" max="200" step="1" /> cm</span>
           <small class="muted"><b>Idéalement 70 à 80 cm</b>, un peu plus qu'un bras tendu : c'est plus précis qu'en étant proche. Mesurez au mètre ruban, de l'objectif à la carte.</small>
         </label>
+        <div class="calib-row">
+          <span id="calibInfo" class="muted small"></span>
+          <button id="calibStartBtn" class="ghost">Calibrer ma caméra</button>
+          <span class="help" tabindex="0" role="button" aria-label="Aide" data-tip="Vous tenez la carte devant la caméra et l'app vous guide vers 9 positions (au centre, inclinée, dans les coins). Elle en déduit la déformation de l'objectif et sa focale. Ensuite, les mesures sont corrigées de cette déformation et la distance est mesurée automatiquement. À faire une fois par caméra.">?</span>
+        </div>
         <details class="advanced">
           <summary>Options avancées</summary>
           <div class="form">
@@ -89,10 +94,12 @@
         <div id="countdown" class="countdown" hidden></div>
         <div class="cta">
           <button id="recBtn" class="primary rec-btn" disabled>● Démarrer la mesure</button>
+          <button id="calibCancelBtn" class="more cancel-calib">Annuler la calibration</button>
           <details class="pop menu">
             <summary class="more">Autres options</summary>
             <div class="pop-body menu-body">
               <button id="switchCamBtn" class="ghost" hidden>Utiliser la caméra arrière</button>
+              <button id="calibBtn" class="ghost">Calibrer cette caméra</button>
               <button id="captureBtn" class="ghost" disabled>Prendre une photo et ajuster à la main</button>
               <label class="button ghost">Importer une photo<input id="fileInput" type="file" accept="image/*" hidden /></label>
               <div class="menu-info small muted">Estimation sans carte : <b id="liveVal">—</b><div id="cardDiag"></div></div>
@@ -196,6 +203,12 @@
     </div>
     <p class="muted">Évitez les cartes de visite (légèrement différentes), et les cartes pliées ou cornées. Une carte qui contraste avec votre peau est plus facile à repérer. Vous pouvez cacher les numéros.</p>
     <form method="dialog"><button class="primary">Compris</button></form>
+  </dialog>
+
+  <dialog id="popCalib" class="dialog">
+    <h2>Caméra calibrée ✓</h2>
+    <div id="calibResult"></div>
+    <form method="dialog"><button class="primary">Continuer</button></form>
   </dialog>
 
   <dialog id="popMath" class="dialog">

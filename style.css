@@ -412,3 +412,14 @@ body[data-view="measure"] .view-measure { display: flex; height: 100%; }
 .tag.off { background: var(--border); color: var(--muted); }
 .video-wrap.rear video, .video-wrap.rear canvas { transform: none; }
 [hidden] { display: none !important; }
+
+/* ---------- calibration ---------- */
+.calib-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-top: 10px; border-top: 1px solid var(--border); }
+.calib-row #calibInfo { flex: 1; min-width: 200px; }
+.cancel-calib { display: none; border: 0; cursor: pointer; }
+body.calibrating .cancel-calib { display: inline-flex; }
+body.calibrating .rec-btn, body.calibrating .cta .menu { display: none; }
+.calib-stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin: 4px 0 10px; }
+.calib-stats div { background: var(--bg); border-radius: 8px; padding: 6px 10px; font-variant-numeric: tabular-nums; font-weight: 600; }
+.calib-stats span { display: block; color: var(--muted); font-size: 0.72rem; font-weight: 400; }
+body.calibrating .cta { bottom: 18px; transform: translate(-50%, 0); }

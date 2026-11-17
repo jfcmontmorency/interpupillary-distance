@@ -30,14 +30,14 @@ function bilinear({ g, W, H }, x, y) {
 }
 
 /** Candidats de bord le long du segment a→b, cherchés à ±radius selon la normale n. */
-function edgeCandidates(img, a, b, n, radius, nSamples) {
+function edgeCandidates(img, a, b, n, radius, nSamples, lo = 0.15) {
   const out = [];
   const ab = sub(b, a);
   const R = Math.ceil(radius) + 2;
   // demi-largeur de bande le long du bord pour moyenner le bruit
   const t = norm(ab);
   for (let s = 0; s < nSamples; s++) {
-    const f = 0.15 + (0.7 * s) / (nSamples - 1);
+    const f = lo + ((1 - 2 * lo) * s) / (nSamples - 1);
     const p = add(a, mul(ab, f));
     const v = [];
     for (let k = -R; k <= R; k++) {
@@ -174,7 +174,7 @@ function shape(c) {
  * combinées et l'on retient le quadrilatère aux bonnes proportions — ce qui écarte
  * les lignes imprimées à l'intérieur de la carte, les sourcils, les cheveux…
  */
-function pass(img, corners, radius, tol, nSamples, maxAngle, multi) {
+function pass(img, corners, radius, tol, nSamples, maxAngle, multi, aspectTol = 0.04) {
   const center = mul(corners.reduce(add, { x: 0, y: 0 }), 0.25);
   const hyps = [];
   for (let e = 0; e < 4; e++) {
@@ -193,7 +193,7 @@ function pass(img, corners, radius, tol, nSamples, maxAngle, multi) {
     const c = quad(lines);
     if (!c) continue;
     const s = shape(c);
-    if (multi && Math.abs(s.aspectErr) > 0.04) continue;
+    if (multi && Math.abs(s.aspectErr) > aspectTol) continue;
     const cov = t.coverage + r.coverage + b.coverage + l.coverage;
     // priorité au soutien des bords, puis au quadrilatère le plus grand (bord extérieur de la carte)
     const score = Math.round(cov * 10) * 1e9 + s.w * s.h;
@@ -208,9 +208,10 @@ function pass(img, corners, radius, tol, nSamples, maxAngle, multi) {
  * radius : rayon de recherche initial en pixels.
  * Retourne { corners, rms, coverage, points } ou { error }.
  */
-export function refineCard(img, corners, radius) {
+export function refineCard(img, corners, radius, opts = {}) {
   const nSamples = 48;
-  let r = pass(img, corners, radius, 2, nSamples, 10, true);
+  // aspectTol : tolérance sur les proportions (élargie pour la calibration, où la carte est inclinée)
+  let r = pass(img, corners, radius, 2, nSamples, opts.maxAngle ?? 10, true, opts.aspectTol ?? 0.04);
   if (r.error) return r;
   // passes fines autour des droites trouvées
   for (const [rad, tol] of [[5, 1.2], [3, 0.8]]) {
@@ -222,4 +223,26 @@ export function refineCard(img, corners, radius) {
   const coverage = Math.min(...r.lines.map((L) => L.coverage));
   const maxRms = Math.max(...r.lines.map((L) => L.rms));
   return { corners: r.corners, rms, maxRms, coverage, points: r.lines.flatMap((L) => L.inliers.map(({ x, y }) => ({ x, y }))) };
+}
+
+/**
+ * Points de bord bruts, sans imposer qu'ils soient alignés (pour mesurer la distorsion) :
+ * le pic de gradient le plus fort de chaque profil, autour du bord estimé, du signe majoritaire.
+ */
+export function sampleEdges(img, corners, radius = 4, nSamples = 96) {
+  const center = mul(corners.reduce(add, { x: 0, y: 0 }), 0.25);
+  const edges = [];
+  for (let e = 0; e < 4; e++) {
+    const a = corners[e], b = corners[(e + 1) % 4];
+    const dir = norm(sub(b, a));
+    let n = { x: -dir.y, y: dir.x };
+    if (dot(n, sub(a, center)) < 0) n = mul(n, -1);
+    const cands = edgeCandidates(img, a, b, n, radius, nSamples, 0.1);
+    const best = new Map();
+    for (const c of cands) if (!best.has(c.s) || c.w > best.get(c.s).w) best.set(c.s, c);
+    const pts = [...best.values()];
+    const sign = Math.sign(pts.reduce((acc, p) => acc + p.sign, 0)) || 1;
+    edges.push(pts.filter((p) => p.sign === sign).map(({ x, y }) => ({ x, y })));
+  }
+  return edges;
 }

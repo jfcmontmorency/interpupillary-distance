@@ -1,5 +1,6 @@
 import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
-import { toGray, refineCard } from "./cardDetect.js";
+import { toGray, refineCard, sampleEdges } from "./cardDetect.js";
+import { calibrate, undistort, projectCard } from "./calib.js";
 
 const WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
 const MODEL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
@@ -50,8 +51,9 @@ for (const key of Object.keys(DEFAULTS)) {
 }
 
 /** Facteur qui ramène la mesure brute à l'EP de loin (parallaxe + convergence). */
-function farFactor(mode) {
-  const D = settings.distanceCm * 10;
+function farFactor(mode, Dmm = null) {
+  // distance mesurée automatiquement (caméra calibrée), sinon celle saisie
+  const D = Dmm || settings.distanceCm * 10;
   const extra = (mode === "card" ? settings.deltaMm : 0) + settings.rotMm;
   return (D + extra) / D;
 }
@@ -206,6 +208,7 @@ async function startCamera() {
     await video.play();
     // effet miroir seulement pour la caméra avant
     $("#videoWrap").classList.toggle("rear", facing === "environment");
+    refreshCamCal();
     lastVideoTime = -1;
     liveCard.corners = null;
     // le bouton de changement n'apparaît que s'il y a plusieurs caméras
@@ -230,6 +233,11 @@ function liveLoop() {
   if (!liveRunning) return;
   if (landmarker && video.readyState >= 2 && video.currentTime !== lastVideoTime) {
     lastVideoTime = video.currentTime;
+    if (calib.active) {
+      calibStep();
+      requestAnimationFrame(liveLoop);
+      return;
+    }
     const a = analyze(landmarker.detectForVideo(video, nextTs()), video.videoWidth, video.videoHeight);
     lastAnalysis = a;
     irisSmooth = smoothIris(a);
@@ -238,6 +246,7 @@ function liveLoop() {
     updateLive(a);
     const q = liveQuality(a);
     showQuality(q);
+    if (!rec.active) $("#hudCount").textContent = liveDistText();
     if (rec.active) recordStep(a, q);
     if (burst) burstStep(a);
   }
@@ -291,6 +300,7 @@ function beep(freq = 880, dur = 0.06, when = 0) {
 }
 
 $("#recBtn").addEventListener("click", () => {
+  if (calib.active) return;
   if (rec.active) return stopRecording();
   try { rec.audio ??= new (window.AudioContext || window.webkitAudioContext)(); rec.audio.resume(); } catch {}
   measurements.length = 0;
@@ -327,7 +337,8 @@ function measureLive(a) {
       { corners: liveCard.corners, frac: 0.12 },
     ], expectedCardW(a));
     if (r.error) return null;
-    const sc = cardScale(r.corners);
+    // caméra calibrée : coins corrigés de la distorsion de l'objectif
+    const sc = cardScale(r.corners.map((p) => undistort(camCal, p)));
     if (sc.tilt > MAX_CARD_TILT) return null;
     mmPerPx = sc.mmPerPx;
   } else {
@@ -335,12 +346,15 @@ function measureLive(a) {
   }
   // les pupilles d'une tête tournée de θ paraissent rapprochées d'un facteur cos θ
   const yawCos = Math.cos((a.yaw * Math.PI) / 180);
+  const od = undistort(camCal, a.od.center), og = undistort(camCal, a.og.center);
   return {
     mode: settings.mode,
     source: "auto",
-    raw: (dist(a.od.center, a.og.center) * mmPerPx) / yawCos,
+    raw: (dist(od, og) * mmPerPx) / yawCos,
     t: a.t3,
     yaw: a.yaw,
+    // distance caméra → carte : focale (px) × mm par px
+    D: settings.mode === "card" && camCal?.f ? camCal.f * mmPerPx : null,
   };
 }
 
@@ -500,6 +514,13 @@ function cardDiagText() {
     (top ? ` · refus le plus fréquent : ${top.last}` : "");
 }
 
+/** Distance caméra → carte estimée en direct (caméra calibrée seulement). */
+function liveDistText() {
+  if (!camCal?.f || !liveCard.corners || settings.mode !== "card") return "";
+  const mm = camCal.f * cardScale(liveCard.corners.map((p) => undistort(camCal, p))).mmPerPx;
+  return `≈ ${Math.round(mm / 10)} cm`;
+}
+
 function drawQuad(pts, color, dash) {
   octx.strokeStyle = color;
   octx.setLineDash(dash);
@@ -579,7 +600,7 @@ function burstStep(a) {
     burst = null;
     $("#captureBtn").disabled = false;
     // la position de carte suivie en direct sert de point de départ sur la capture
-    openEditor(img, liveCard.corners);
+    openEditor(img, liveCard.corners, camCal);
   }
 }
 
@@ -595,6 +616,188 @@ $("#fileInput").addEventListener("change", async (e) => {
   c.height = Math.round(bmp.height * k);
   c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
   openEditor(c);
+});
+
+// ---------- calibration de la caméra ----------
+// Mémorisée par caméra et par résolution (localStorage) : à refaire seulement si l'on change de caméra.
+const CAL_KEY = "ipd-calib";
+let camCal = null; // calibration de la caméra active, ou null
+
+function camKey() {
+  const t = video.srcObject?.getVideoTracks?.()[0];
+  if (!t) return null;
+  return `${t.label || t.getSettings().deviceId || "caméra"}|${video.videoWidth}x${video.videoHeight}`;
+}
+function loadCals() {
+  try { return JSON.parse(localStorage.getItem(CAL_KEY) || "{}"); } catch { return {}; }
+}
+function refreshCamCal() {
+  const k = camKey();
+  camCal = k ? loadCals()[k] || null : null;
+  updateCalibInfo();
+}
+function updateCalibInfo() {
+  const n = Object.keys(loadCals()).length;
+  $("#calibInfo").innerHTML = n
+    ? "✓ Caméra calibrée sur cet appareil : la distance sera mesurée automatiquement."
+    : "Facultatif : calibrer la caméra (1 min) corrige la déformation de l'objectif et mesure la distance pour vous.";
+  $("#calibStartBtn").textContent = n ? "Recalibrer" : "Calibrer ma caméra";
+}
+
+const calib = { active: false, targets: [], idx: 0, views: [], last: null, stable: 0, next: 0, current: null, ok: false };
+
+/** 9 positions : centre de face, pivotée ×2, inclinée ×2, puis les 4 coins de l'image. */
+function buildTargets(W, H) {
+  const f0 = W / 2 / Math.tan((35 * Math.PI) / 180); // focale approximative d'une webcam (≈ 70°)
+  const tw = 0.22 * W;
+  const Z = (f0 * 85.6) / tw;
+  const spec = [
+    [0.5, 0.5, 0, 0, "front", "Tenez la carte au centre, bien face à la caméra"],
+    [0.5, 0.5, 35, 0, "yaw", "Faites pivoter la carte comme le cadre (vers un côté)"],
+    [0.5, 0.5, -35, 0, "yaw", "Faites pivoter la carte vers l'autre côté"],
+    [0.5, 0.5, 0, 35, "pitch", "Inclinez le haut de la carte comme le cadre"],
+    [0.5, 0.5, 0, -35, "pitch", "Inclinez la carte dans l'autre sens"],
+    [0.18, 0.25, 0, 0, "front", "Placez la carte sur le cadre, dans le coin"],
+    [0.82, 0.25, 0, 0, "front", "Placez la carte sur le cadre, dans le coin"],
+    [0.82, 0.75, 0, 0, "front", "Placez la carte sur le cadre, dans le coin"],
+    [0.18, 0.75, 0, 0, "front", "Placez la carte sur le cadre, dans le coin"],
+  ];
+  return spec.map(([nx, ny, yaw, pitch, kind, msg]) => {
+    const X = ((nx - 0.5) * W * Z) / f0, Y = ((ny - 0.5) * H * Z) / f0;
+    const corners = projectCard(f0, W / 2, H / 2, X, Y, Z, yaw, pitch);
+    return { corners, kind, msg, center: mul(corners.reduce(add, { x: 0, y: 0 }), 0.25), width: cardWidth(corners), shape: tiltShape(corners) };
+  });
+}
+
+/** Déformation en trapèze : rY > 0 si le bord gauche (image) est plus grand, rP > 0 si le bord haut l'est. */
+function tiltShape(c) {
+  return { rY: dist(c[0], c[3]) / dist(c[1], c[2]) - 1, rP: dist(c[0], c[1]) / dist(c[3], c[2]) - 1 };
+}
+
+function matchesTarget(c, T) {
+  const W = video.videoWidth;
+  const center = mul(c.reduce(add, { x: 0, y: 0 }), 0.25);
+  if (dist(center, T.center) > 0.15 * W) return "move";
+  const ratio = cardWidth(c) / T.width;
+  if (ratio < 0.55) return "closer";
+  if (ratio > 1.7) return "farther";
+  const sh = tiltShape(c);
+  const want = T.kind === "yaw" ? [sh.rY, T.shape.rY] : T.kind === "pitch" ? [sh.rP, T.shape.rP] : null;
+  if (want && (Math.sign(want[0]) !== Math.sign(want[1]) || Math.abs(want[0]) < 0.05)) return "tilt";
+  return "ok";
+}
+
+async function startCalibration() {
+  await startCamera();
+  if (!video.srcObject || !video.videoWidth) return;
+  if (rec.active) stopRecording();
+  document.querySelectorAll("details.pop[open]").forEach((d) => (d.open = false));
+  Object.assign(calib, { active: true, targets: buildTargets(video.videoWidth, video.videoHeight), idx: 0, views: [], last: null, stable: 0, next: 0, current: null, ok: false });
+  try { rec.audio ??= new (window.AudioContext || window.webkitAudioContext)(); rec.audio.resume(); } catch {}
+  document.body.classList.add("calibrating");
+  $("#recBar").style.width = "0%";
+}
+
+function stopCalibration() {
+  calib.active = false;
+  document.body.classList.remove("calibrating");
+  $("#recBar").style.width = "0%";
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+}
+
+function calibStep() {
+  const T = calib.targets[calib.idx];
+  const W = video.videoWidth, H = video.videoHeight;
+  const now = performance.now();
+  if (now >= calib.next) {
+    calib.next = now + 180;
+    fullCanvas.width = W;
+    fullCanvas.height = H;
+    fullCanvas.getContext("2d", { willReadFrequently: true }).drawImage(video, 0, 0);
+    const gray = toGray(fullCanvas);
+    let found = null;
+    // suivi de la carte d'une image à l'autre, sinon recherche large autour du cadre cible
+    for (const [g, frac] of [[calib.last, 0.25], [T.corners, 0.45]].filter(([g]) => g)) {
+      const r = refineCard(gray, g, Math.max(10, frac * cardWidth(g)), { aspectTol: 0.5, maxAngle: 25 });
+      if (!r.error && r.coverage >= 0.5 && r.maxRms < 2) { found = r; break; }
+    }
+    if (!found) {
+      Object.assign(calib, { current: null, last: null, stable: 0, ok: false, state: "none" });
+    } else {
+      const st = matchesTarget(found.corners, T);
+      const still = calib.last && Math.max(...found.corners.map((p, i) => dist(p, calib.last[i]))) < 3;
+      calib.stable = st === "ok" ? (still ? calib.stable + 1 : 1) : 0;
+      Object.assign(calib, { current: found.corners, last: found.corners, ok: st === "ok", state: st });
+      // position tenue ~0,5 s : on capture cette vue
+      if (calib.stable >= 3) {
+        calib.views.push({ corners: found.corners, edges: sampleEdges(gray, found.corners, 5) });
+        beep();
+        const w = $("#videoWrap");
+        w.classList.add("flash");
+        setTimeout(() => w.classList.remove("flash"), 120);
+        Object.assign(calib, { idx: calib.idx + 1, stable: 0, last: null, current: null, ok: false });
+        $("#recBar").style.width = (100 * calib.idx) / calib.targets.length + "%";
+        if (calib.idx >= calib.targets.length) return finishCalibration();
+      }
+    }
+  }
+  drawCalibOverlay();
+  const msgs = {
+    none: calib.targets[calib.idx].msg,
+    move: "Amenez la carte sur le cadre orange",
+    closer: "Rapprochez la carte de la caméra",
+    farther: "Éloignez un peu la carte",
+    tilt: calib.targets[calib.idx].kind === "front" ? "Tenez la carte bien à plat" : "Inclinez davantage, comme le cadre",
+    ok: "Parfait, ne bougez plus…",
+  };
+  showQuality({ level: calib.ok ? "ok" : calib.current ? "warn" : "bad", msg: msgs[calib.state || "none"] });
+  $("#hudCount").textContent = `${calib.idx + 1} / ${calib.targets.length}`;
+}
+
+function drawCalibOverlay() {
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  const T = calib.targets[calib.idx];
+  if (!T) return;
+  const lw = Math.max(2, overlay.width / 600);
+  octx.lineWidth = lw;
+  drawQuad(T.corners, "rgba(245,165,36,0.95)", [lw * 6, lw * 4]);
+  if (calib.current) {
+    octx.lineWidth = lw * 1.5;
+    drawQuad(calib.current, calib.ok ? "#2fbf71" : "rgba(255,255,255,0.85)", []);
+  }
+}
+
+function finishCalibration() {
+  const W = video.videoWidth, H = video.videoHeight;
+  const res = calibrate(calib.views, W, H);
+  stopCalibration();
+  beep(660, 0.12);
+  beep(990, 0.18, 0.15);
+  const focalOk = res.f && res.hfov > 30 && res.hfov < 130;
+  const cal = { cx: res.cx, cy: res.cy, R: res.R, k1: res.k1, f: focalOk ? res.f : null, W, H, hfov: focalOk ? res.hfov : null, date: Date.now() };
+  const all = loadCals();
+  all[camKey()] = cal;
+  try { localStorage.setItem(CAL_KEY, JSON.stringify(all)); } catch {}
+  refreshCamCal();
+  // déformation relative aux coins de l'image (ρ = 1)
+  const edgePct = Math.abs(res.k1) * 100;
+  $("#calibResult").innerHTML = `
+    <div class="calib-stats">
+      <div><span>Champ de vision</span>${focalOk ? fmt(res.hfov, 0) + "°" : "—"}</div>
+      <div><span>Déformation de l'objectif</span>${fmt(edgePct, 1)} %</div>
+    </div>
+    <p>${focalOk
+      ? "La distance à la caméra sera désormais <b>mesurée automatiquement</b> : plus besoin de mètre ruban."
+      : "La déformation est corrigée, mais la focale n'a pas pu être déterminée : la distance saisie reste utilisée. Recommencez en inclinant davantage la carte."}</p>
+    <p class="muted small">Calibration mémorisée pour cette caméra (${W}×${H}).</p>`;
+  $("#popCalib").showModal();
+}
+
+$("#calibBtn").addEventListener("click", startCalibration);
+$("#calibCancelBtn").addEventListener("click", stopCalibration);
+$("#calibStartBtn").addEventListener("click", () => {
+  setView("measure");
+  startCalibration();
 });
 
 // ---------- éditeur ----------
@@ -614,7 +817,7 @@ const LABELS = {
   c3: "carte – coin bas gauche",
 };
 
-function openEditor(img, cardHint = null) {
+function openEditor(img, cardHint = null, cal = null) {
   const W = img.width, H = img.height;
   const a = analyze(landmarker.detectForVideo(img, nextTs()), W, H);
   let od, og, bridge, irisDiam = null, pose = null;
@@ -630,7 +833,7 @@ function openEditor(img, cardHint = null) {
   const start = cardHint || faceGuess;
 
   editor = {
-    img, W, H, irisDiam, pose, faceGuess, cardHint,
+    img, W, H, irisDiam, pose, faceGuess, cardHint, cal,
     markers: { od, og, bridge, c0: start[0], c1: start[1], c2: start[2], c3: start[3] },
     selected: "od",
     drag: null,
@@ -833,7 +1036,9 @@ window.addEventListener("resize", renderEditor);
 
 /** Calcul pour la capture en cours. */
 function computeEditor() {
-  const { markers: m, irisDiam, pose } = editor;
+  const { markers: m0, irisDiam, pose, cal } = editor;
+  // photo prise avec une caméra calibrée : repères corrigés de la distorsion
+  const m = Object.fromEntries(Object.entries(m0).map(([k, p]) => [k, undistort(cal, p)]));
   const mode = settings.mode;
   const warnings = [];
   let mmPerPx;
@@ -856,11 +1061,12 @@ function computeEditor() {
   const u = sub(m.og, m.od);
   // part du nez mesurée sur les repères, corrigée de la rotation de la tête (estimée en 3D)
   const t = clamp(dot(sub(m.bridge, m.od), u) / dot(u, u) + (pose ? pose.tCorr : 0), 0, 1);
-  return { mode, raw, t, yaw: pose ? pose.yaw : null, warnings };
+  const D = mode === "card" && cal?.f ? cal.f * mmPerPx : null;
+  return { mode, raw, t, yaw: pose ? pose.yaw : null, warnings, D };
 }
 
 function derive(meas) {
-  const far = meas.raw * farFactor(meas.mode);
+  const far = meas.raw * farFactor(meas.mode, meas.D);
   return { far, odMono: far * meas.t, ogMono: far * (1 - meas.t), near: nearFromFar(far) };
 }
 
@@ -874,7 +1080,7 @@ function updateEditResult() {
     <div class="big">${fmt(d.far, 1)} mm</div>
     <div>Œil droit ${fmt(d.odMono)} · œil gauche ${fmt(d.ogMono)} mm</div>
     ${r.warnings.map((w) => `<p class="warn">${w}</p>`).join("")}
-    <div class="muted small">Mesure brute ${fmt(r.raw, 2)} mm × correction ${fmt(farFactor(r.mode), 4)}</div>`;
+    <div class="muted small">Mesure brute ${fmt(r.raw, 2)} mm × correction ${fmt(farFactor(r.mode, r.D), 4)}${r.D ? ` · distance mesurée ${fmt(r.D / 10, 0)} cm` : ""}</div>`;
 }
 
 $("#addBtn").addEventListener("click", () => {
@@ -1010,7 +1216,9 @@ function renderResults(animate = false) {
   const near = nearFromFar(far.mean);
   // l'essai en cours est enregistré (ou mis à jour) dans l'historique de session
   seriesId ??= Date.now();
-  upsertHistory({ id: seriesId, mean: far.mean, sd: far.sd, n: far.n, od: odS.mean, og: ogS.mean, dist: settings.distanceCm, mode: settings.mode });
+  const Ds = measurements.map((m) => m.D).filter(Boolean);
+  const Dmean = Ds.length ? Ds.reduce((acc, v) => acc + v, 0) / Ds.length : null;
+  upsertHistory({ id: seriesId, mean: far.mean, sd: far.sd, n: far.n, od: odS.mean, og: ogS.mean, dist: Dmean ? Math.round(Dmean / 10) : settings.distanceCm, auto: !!Dmean, mode: settings.mode });
   renderHistory();
   // Résultat principal : avec plusieurs essais, la moyenne des essais (plus fiable qu'un seul,
   // car chaque essai a son petit biais : position de la carte, de la tête…)
@@ -1046,6 +1254,7 @@ function renderResults(animate = false) {
       <div><span>IC 95 % de cet essai</span>${far.n > 1 ? "± " + fmt(far.ci, 2) + " mm" : "—"}</div>
       <div><span>Écart-type</span>${far.n > 1 ? fmt(far.sd, 2) + " mm" : "—"}</div>
       <div><span>Médiane</span>${fmt(far.med, 2)} mm</div>
+      <div><span>Distance caméra</span>${Dmean ? fmt(Dmean / 10, 1) + " cm (mesurée)" : settings.distanceCm + " cm (saisie)"}</div>
       <div><span>EP de près, lecture à ${NEAR_CM} cm</span>${fmt(near, 2)} mm</div>
     </div>
     <p class="muted small">Valeurs aberrantes écartées au-delà de 3 écarts absolus médians. L'intervalle de confiance de l'essai ne couvre que la variation entre ses mesures ; chaque essai a en plus un petit biais propre (position de la carte et de la tête), d'où l'intérêt de faire la moyenne de plusieurs essais.</p>`;
@@ -1117,7 +1326,7 @@ function renderHistory() {
     const time = new Date(e.id).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
     tr.innerHTML = `<td>${i + 1}${e.id === seriesId ? ' <span class="tag">actuel</span>' : ""}${ts && !ts.keep[i] ? ' <span class="tag off">écarté</span>' : ""}</td><td>${time}</td>
       <td><b>${fmt(e.mean, 1)} mm</b>${e.n > 1 ? ` <span class="muted">± ${fmt(e.sd, 2)}</span>` : ""}</td>
-      <td>${fmt(e.od)} / ${fmt(e.og)}</td><td>${e.dist} cm${e.mode === "iris" ? " · sans carte" : ""}</td><td>${e.n}</td>`;
+      <td>${fmt(e.od)} / ${fmt(e.og)}</td><td>${e.dist} cm${e.auto ? " · auto" : ""}${e.mode === "iris" ? " · sans carte" : ""}</td><td>${e.n}</td>`;
     body.appendChild(tr);
   });
   // cohérence entre essais
@@ -1140,6 +1349,7 @@ $("#histReset").addEventListener("click", () => {
   renderHistory();
 });
 renderHistory();
+updateCalibInfo();
 
 // ---------- aide et menus ----------
 document.querySelectorAll("[data-pop]").forEach((b) =>
@@ -1159,7 +1369,7 @@ const modelReady = initLandmarker()
 
 // accès de test : http://localhost:8123/?debug
 if (new URLSearchParams(location.search).has("debug")) {
-  window.__ipd = { measurements, showResults, renderResults, rec, findCard, cardError };
+  window.__ipd = { measurements, showResults, renderResults, rec, findCard, cardError, calib, getCamCal: () => camCal, refreshCamCal };
 }
 
 // aide (?) : un toucher l'ouvre ou la ferme (utile sur mobile), sans activer le champ associé
