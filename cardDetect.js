@@ -48,7 +48,13 @@ function edgeCandidates(img, a, b, n, radius, nSamples, lo = 0.15) {
       }
       v.push(cnt ? acc / cnt : NaN);
     }
-    if (v.some(Number.isNaN)) continue;
+    // profil partiellement hors de l'image (carte près du bord) : on prolonge la dernière valeur
+    // valide plutôt que d'abandonner le profil ; le gradient y est nul, donc sans pic parasite
+    const firstOk = v.findIndex((x) => !Number.isNaN(x));
+    if (firstOk < 0) continue;
+    if (v.filter((x) => !Number.isNaN(x)).length < 6) continue;
+    for (let i = firstOk - 1; i >= 0; i--) v[i] = v[i + 1];
+    for (let i = firstOk + 1; i < v.length; i++) if (Number.isNaN(v[i])) v[i] = v[i - 1];
     const sm = v.map((_, i) => (i === 0 || i === v.length - 1 ? v[i] : (v[i - 1] + 2 * v[i] + v[i + 1]) / 4));
     const d = sm.map((_, i) => (i === 0 || i === sm.length - 1 ? 0 : (sm[i + 1] - sm[i - 1]) / 2));
     const peaks = [];
@@ -242,7 +248,44 @@ export function sampleEdges(img, corners, radius = 4, nSamples = 96) {
     for (const c of cands) if (!best.has(c.s) || c.w > best.get(c.s).w) best.set(c.s, c);
     const pts = [...best.values()];
     const sign = Math.sign(pts.reduce((acc, p) => acc + p.sign, 0)) || 1;
-    edges.push(pts.filter((p) => p.sign === sign).map(({ x, y }) => ({ x, y })));
+    edges.push(trimEdge(pts.filter((p) => p.sign === sign).map(({ x, y }) => ({ x, y })), a, dir));
   }
   return edges;
+}
+
+/**
+ * Retire les points parasites d'un bord (doigts, reflets) : ajustement d'une parabole
+ * (un bord légèrement courbé par la distorsion reste une parabole), rejet des points à plus
+ * de 3 écarts absolus médians (au moins 1 px), puis second ajustement.
+ */
+function trimEdge(pts, origin, dir) {
+  if (pts.length < 12) return pts;
+  const nrm = { x: -dir.y, y: dir.x };
+  let keep = pts;
+  for (let pass = 0; pass < 2; pass++) {
+    // u mis à l'échelle (÷ 100) pour le conditionnement numérique
+    const uv = keep.map((p) => { const d = sub(p, origin); return [dot(d, dir) / 100, dot(d, nrm)]; });
+    // moindres carrés v = c0 + c1·u + c2·u²
+    const S = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], b = [0, 0, 0];
+    for (const [u, v] of uv) {
+      const row = [1, u, u * u];
+      for (let i = 0; i < 3; i++) { b[i] += row[i] * v; for (let j = 0; j < 3; j++) S[i][j] += row[i] * row[j]; }
+    }
+    const c = solve3(S, b);
+    if (!c) return keep;
+    const res = uv.map(([u, v]) => Math.abs(v - (c[0] + c[1] * u + c[2] * u * u)));
+    const med = res.slice().sort((x, y) => x - y)[res.length >> 1];
+    const lim = Math.max(1, 3 * 1.4826 * med);
+    const next = keep.filter((_, i) => res[i] <= lim);
+    if (next.length < 12 || next.length === keep.length) return next.length < 12 ? keep : next;
+    keep = next;
+  }
+  return keep;
+}
+
+function solve3(A, b) {
+  const det = (m) => m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+  const D = det(A);
+  if (Math.abs(D) < 1e-12) return null;
+  return [0, 1, 2].map((k) => det(A.map((row, i) => row.map((v, j) => (j === k ? b[i] : v)))) / D);
 }

@@ -219,11 +219,12 @@ async function startCamera() {
     overlay.width = video.videoWidth;
     overlay.height = video.videoHeight;
     setStatus("Caméra active");
+    // la boucle démarre tout de suite (la calibration n'a pas besoin du modèle du visage)
+    $("#hud").hidden = false;
+    if (!liveRunning) { liveRunning = true; requestAnimationFrame(liveLoop); }
     await modelReady;
     $("#captureBtn").disabled = false;
     $("#recBtn").disabled = false;
-    $("#hud").hidden = false;
-    if (!liveRunning) { liveRunning = true; requestAnimationFrame(liveLoop); }
   } catch (e) {
     setStatus("Caméra indisponible : " + e.message);
   }
@@ -231,7 +232,7 @@ async function startCamera() {
 
 function liveLoop() {
   if (!liveRunning) return;
-  if (landmarker && video.readyState >= 2 && video.currentTime !== lastVideoTime) {
+  if ((landmarker || calib.active) && video.readyState >= 2 && video.currentTime !== lastVideoTime) {
     lastVideoTime = video.currentTime;
     if (calib.active) {
       calibStep();
@@ -644,47 +645,37 @@ function updateCalibInfo() {
   $("#calibStartBtn").textContent = n ? "Recalibrer" : "Calibrer ma caméra";
 }
 
-const calib = { active: false, targets: [], idx: 0, views: [], last: null, stable: 0, next: 0, current: null, ok: false };
+// Calibration libre : on place la carte une fois au centre, puis on la bouge à sa guise.
+// L'app la suit et capture d'elle-même chaque vue qui apporte quelque chose de nouveau :
+// un coin de l'image encore vide, une rotation (gauche/droite) ou une inclinaison (haut/bas).
+const NEEDS = ["center", "TL", "TR", "BR", "BL", "yaw+", "yaw-", "pitch+", "pitch-"];
+const calib = { active: false, views: [], done: new Set(), track: null, seen: null, stable: 0, next: 0, lost: 0, frame: null, state: "acquire" };
 
-/** 9 positions : centre de face, pivotée ×2, inclinée ×2, puis les 4 coins de l'image. */
-function buildTargets(W, H) {
-  const f0 = W / 2 / Math.tan((35 * Math.PI) / 180); // focale approximative d'une webcam (≈ 70°)
-  const tw = 0.22 * W;
-  const Z = (f0 * 85.6) / tw;
-  const spec = [
-    [0.5, 0.5, 0, 0, "front", "Tenez la carte au centre, bien face à la caméra"],
-    [0.5, 0.5, 35, 0, "yaw", "Faites pivoter la carte comme le cadre (vers un côté)"],
-    [0.5, 0.5, -35, 0, "yaw", "Faites pivoter la carte vers l'autre côté"],
-    [0.5, 0.5, 0, 35, "pitch", "Inclinez le haut de la carte comme le cadre"],
-    [0.5, 0.5, 0, -35, "pitch", "Inclinez la carte dans l'autre sens"],
-    [0.18, 0.25, 0, 0, "front", "Placez la carte sur le cadre, dans le coin"],
-    [0.82, 0.25, 0, 0, "front", "Placez la carte sur le cadre, dans le coin"],
-    [0.82, 0.75, 0, 0, "front", "Placez la carte sur le cadre, dans le coin"],
-    [0.18, 0.75, 0, 0, "front", "Placez la carte sur le cadre, dans le coin"],
-  ];
-  return spec.map(([nx, ny, yaw, pitch, kind, msg]) => {
-    const X = ((nx - 0.5) * W * Z) / f0, Y = ((ny - 0.5) * H * Z) / f0;
-    const corners = projectCard(f0, W / 2, H / 2, X, Y, Z, yaw, pitch);
-    return { corners, kind, msg, center: mul(corners.reduce(add, { x: 0, y: 0 }), 0.25), width: cardWidth(corners), shape: tiltShape(corners) };
-  });
+/** Cadre de départ au centre (taille d'une carte tenue à ~35 cm d'une webcam ordinaire). */
+function centerFrame(W, H) {
+  const f0 = W / 2 / Math.tan((35 * Math.PI) / 180);
+  const Z = (f0 * 85.6) / (0.24 * W);
+  return projectCard(f0, W / 2, H / 2, 0, 0, Z);
 }
 
-/** Déformation en trapèze : rY > 0 si le bord gauche (image) est plus grand, rP > 0 si le bord haut l'est. */
+/** Déformation en trapèze : rY ≠ 0 si la carte pivote (gauche/droite), rP ≠ 0 si elle bascule (haut/bas). */
 function tiltShape(c) {
   return { rY: dist(c[0], c[3]) / dist(c[1], c[2]) - 1, rP: dist(c[0], c[1]) / dist(c[3], c[2]) - 1 };
 }
 
-function matchesTarget(c, T) {
-  const W = video.videoWidth;
-  const center = mul(c.reduce(add, { x: 0, y: 0 }), 0.25);
-  if (dist(center, T.center) > 0.15 * W) return "move";
-  const ratio = cardWidth(c) / T.width;
-  if (ratio < 0.55) return "closer";
-  if (ratio > 1.7) return "farther";
+/** Ce qu'une vue apporte : zone de l'image et inclinaisons. */
+function viewKinds(c) {
+  const W = video.videoWidth, H = video.videoHeight;
+  const m = mul(c.reduce(add, { x: 0, y: 0 }), 0.25);
+  const nx = m.x / W - 0.5, ny = m.y / H - 0.5;
   const sh = tiltShape(c);
-  const want = T.kind === "yaw" ? [sh.rY, T.shape.rY] : T.kind === "pitch" ? [sh.rP, T.shape.rP] : null;
-  if (want && (Math.sign(want[0]) !== Math.sign(want[1]) || Math.abs(want[0]) < 0.05)) return "tilt";
-  return "ok";
+  const kinds = [];
+  const flat = Math.abs(sh.rY) < 0.04 && Math.abs(sh.rP) < 0.04;
+  if (flat && Math.abs(nx) < 0.15 && Math.abs(ny) < 0.15) kinds.push("center");
+  if (Math.abs(nx) > 0.17 && Math.abs(ny) > 0.1) kinds.push((ny < 0 ? "T" : "B") + (nx < 0 ? "L" : "R"));
+  if (Math.abs(sh.rY) >= 0.05) kinds.push(sh.rY > 0 ? "yaw+" : "yaw-");
+  if (Math.abs(sh.rP) >= 0.05) kinds.push(sh.rP > 0 ? "pitch+" : "pitch-");
+  return kinds;
 }
 
 async function startCalibration() {
@@ -692,7 +683,8 @@ async function startCalibration() {
   if (!video.srcObject || !video.videoWidth) return;
   if (rec.active) stopRecording();
   document.querySelectorAll("details.pop[open]").forEach((d) => (d.open = false));
-  Object.assign(calib, { active: true, targets: buildTargets(video.videoWidth, video.videoHeight), idx: 0, views: [], last: null, stable: 0, next: 0, current: null, ok: false });
+  Object.assign(calib, { active: true, views: [], done: new Set(), track: null, seen: null, stable: 0, next: 0, lost: 0, state: "acquire",
+    frame: centerFrame(video.videoWidth, video.videoHeight) });
   try { rec.audio ??= new (window.AudioContext || window.webkitAudioContext)(); rec.audio.resume(); } catch {}
   document.body.classList.add("calibrating");
   $("#recBar").style.width = "0%";
@@ -705,65 +697,111 @@ function stopCalibration() {
   octx.clearRect(0, 0, overlay.width, overlay.height);
 }
 
+const calibCanvas = document.createElement("canvas");
+
 function calibStep() {
-  const T = calib.targets[calib.idx];
   const W = video.videoWidth, H = video.videoHeight;
   const now = performance.now();
   if (now >= calib.next) {
-    calib.next = now + 180;
-    fullCanvas.width = W;
-    fullCanvas.height = H;
-    fullCanvas.getContext("2d", { willReadFrequently: true }).drawImage(video, 0, 0);
-    const gray = toGray(fullCanvas);
+    calib.next = now + 100;
+    // suivi rapide sur une image réduite
+    const s = Math.min(1, 960 / W);
+    calibCanvas.width = Math.round(W * s);
+    calibCanvas.height = Math.round(H * s);
+    calibCanvas.getContext("2d", { willReadFrequently: true }).drawImage(video, 0, 0, calibCanvas.width, calibCanvas.height);
+    const gray = toGray(calibCanvas);
+    const down = (pts) => pts.map((p) => mul(p, s));
+    // 1) suivi autour de la position précédente ; 2) recherche large là où la carte a été vue
+    // pour la dernière fois (mouvement rapide) ; 3) cadre de départ au centre
+    const guesses = [[calib.track, 0.3], [calib.seen, 0.8], [calib.frame, 0.5]].filter(([g]) => g);
+    // carte perdue : on la cherche aussi, à tour de rôle, dans les coins encore à faire
+    if (!calib.track) {
+      const spots = ["TL", "TR", "BR", "BL"].filter((k) => !calib.done.has(k));
+      if (spots.length) {
+        const k = spots[(calib.scan = (calib.scan || 0) + 1) % spots.length];
+        const shape = calib.seen || calib.frame;
+        const m = mul(shape.reduce(add, { x: 0, y: 0 }), 0.25);
+        const to = { x: W * (k[1] === "L" ? 0.2 : 0.8), y: H * (k[0] === "T" ? 0.24 : 0.76) };
+        guesses.push([shape.map((p) => add(p, sub(to, m))), 0.6]);
+      }
+    }
     let found = null;
-    // suivi de la carte d'une image à l'autre, sinon recherche large autour du cadre cible
-    for (const [g, frac] of [[calib.last, 0.25], [T.corners, 0.45]].filter(([g]) => g)) {
-      const r = refineCard(gray, g, Math.max(10, frac * cardWidth(g)), { aspectTol: 0.5, maxAngle: 25 });
-      if (!r.error && r.coverage >= 0.5 && r.maxRms < 2) { found = r; break; }
+    for (const [g, frac] of guesses) {
+      const r = refineCard(gray, down(g), Math.max(8, frac * cardWidth(g) * s), { aspectTol: 0.6, maxAngle: 30 });
+      // tolérant : les doigts cachent souvent une partie des bords
+      if (!r.error && r.coverage >= 0.3 && r.maxRms < 2.5) { found = r.corners.map((p) => mul(p, 1 / s)); break; }
     }
     if (!found) {
-      Object.assign(calib, { current: null, last: null, stable: 0, ok: false, state: "none" });
+      if (++calib.lost > 4) Object.assign(calib, { track: null, stable: 0 });
     } else {
-      const st = matchesTarget(found.corners, T);
-      const still = calib.last && Math.max(...found.corners.map((p, i) => dist(p, calib.last[i]))) < 3;
-      calib.stable = st === "ok" ? (still ? calib.stable + 1 : 1) : 0;
-      Object.assign(calib, { current: found.corners, last: found.corners, ok: st === "ok", state: st });
-      // position tenue ~0,5 s : on capture cette vue
-      if (calib.stable >= 3) {
-        calib.views.push({ corners: found.corners, edges: sampleEdges(gray, found.corners, 5) });
-        beep();
-        const w = $("#videoWrap");
-        w.classList.add("flash");
-        setTimeout(() => w.classList.remove("flash"), 120);
-        Object.assign(calib, { idx: calib.idx + 1, stable: 0, last: null, current: null, ok: false });
-        $("#recBar").style.width = (100 * calib.idx) / calib.targets.length + "%";
-        if (calib.idx >= calib.targets.length) return finishCalibration();
-      }
+      calib.lost = 0;
+      // immobile = déplacement < 2,5 % de la largeur de la carte entre deux analyses
+      const still = calib.track && Math.max(...found.map((p, i) => dist(p, calib.track[i]))) < 0.025 * cardWidth(found);
+      calib.stable = still ? calib.stable + 1 : 0;
+      calib.track = found;
+      calib.seen = found;
+      const fresh = viewKinds(found).filter((k) => !calib.done.has(k));
+      calib.state = fresh.length ? (calib.stable >= 2 ? "capture" : "hold") : "move";
+      if (fresh.length && calib.stable >= 2) captureCalibView(found, fresh);
+      if (calib.done.size >= NEEDS.length) return finishCalibration();
     }
   }
   drawCalibOverlay();
-  const msgs = {
-    none: calib.targets[calib.idx].msg,
-    move: "Amenez la carte sur le cadre orange",
-    closer: "Rapprochez la carte de la caméra",
-    farther: "Éloignez un peu la carte",
-    tilt: calib.targets[calib.idx].kind === "front" ? "Tenez la carte bien à plat" : "Inclinez davantage, comme le cadre",
-    ok: "Parfait, ne bougez plus…",
-  };
-  showQuality({ level: calib.ok ? "ok" : calib.current ? "warn" : "bad", msg: msgs[calib.state || "none"] });
-  $("#hudCount").textContent = `${calib.idx + 1} / ${calib.targets.length}`;
+  const missing = NEEDS.filter((k) => !calib.done.has(k));
+  const next = missing[0] || "";
+  // perdue depuis peu (mouvement rapide) ou depuis longtemps (> 2 s) : consignes différentes
+  const lostLong = !calib.seen || calib.lost >= 20;
+  const hint = !calib.track ? (lostLong ? "Placez la carte dans le cadre orange, au centre" : "Bougez la carte un peu plus lentement")
+    : calib.state === "hold" ? "Ne bougez plus…"
+    : next === "center" ? "Tenez la carte au centre, bien face à la caméra"
+    : next.length === 2 ? "Amenez la carte vers un coin orange"
+    : next.startsWith("yaw") ? "Faites pivoter la carte vers la gauche ou la droite"
+    : "Basculez le haut de la carte vers l'avant ou l'arrière";
+  showQuality({ level: !calib.track ? (lostLong ? "bad" : "warn") : calib.state === "move" ? "warn" : "ok", msg: hint });
+  $("#hudCount").textContent = `${calib.done.size} / ${NEEDS.length}`;
+}
+
+/** Capture en pleine résolution : coins précis + points de bord pour la distorsion. */
+function captureCalibView(guess, kinds) {
+  const W = video.videoWidth, H = video.videoHeight;
+  fullCanvas.width = W;
+  fullCanvas.height = H;
+  fullCanvas.getContext("2d", { willReadFrequently: true }).drawImage(video, 0, 0);
+  const gray = toGray(fullCanvas);
+  const r = refineCard(gray, guess, Math.max(10, 0.06 * cardWidth(guess)), { aspectTol: 0.6, maxAngle: 10 });
+  if (r.error || r.coverage < 0.3) return;
+  calib.views.push({ corners: r.corners, edges: sampleEdges(gray, r.corners, 5) });
+  kinds.forEach((k) => calib.done.add(k));
+  calib.stable = 0;
+  beep();
+  const w = $("#videoWrap");
+  w.classList.add("flash");
+  setTimeout(() => w.classList.remove("flash"), 120);
+  $("#recBar").style.width = (100 * calib.done.size) / NEEDS.length + "%";
 }
 
 function drawCalibOverlay() {
   octx.clearRect(0, 0, overlay.width, overlay.height);
-  const T = calib.targets[calib.idx];
-  if (!T) return;
-  const lw = Math.max(2, overlay.width / 600);
+  const W = overlay.width, H = overlay.height;
+  const lw = Math.max(2, W / 600);
+  // repères de coins : orange à faire, vert fait
+  const L = 0.07 * W, ix = 0.05 * W, iy = 0.07 * H;
+  const corners = { TL: [ix, iy, 1, 1], TR: [W - ix, iy, -1, 1], BR: [W - ix, H - iy, -1, -1], BL: [ix, H - iy, 1, -1] };
+  for (const [k, [x, y, sx, sy]] of Object.entries(corners)) {
+    octx.strokeStyle = calib.done.has(k) ? "#2fbf71" : "rgba(245,165,36,0.95)";
+    octx.lineWidth = lw * 2.5;
+    octx.beginPath();
+    octx.moveTo(x, y + sy * L);
+    octx.lineTo(x, y);
+    octx.lineTo(x + sx * L, y);
+    octx.stroke();
+  }
   octx.lineWidth = lw;
-  drawQuad(T.corners, "rgba(245,165,36,0.95)", [lw * 6, lw * 4]);
-  if (calib.current) {
+  if (!calib.track && (!calib.seen || calib.lost >= 20)) {
+    drawQuad(calib.frame, "rgba(245,165,36,0.95)", [lw * 6, lw * 4]);
+  } else if (calib.track) {
     octx.lineWidth = lw * 1.5;
-    drawQuad(calib.current, calib.ok ? "#2fbf71" : "rgba(255,255,255,0.85)", []);
+    drawQuad(calib.track, calib.state === "move" ? "rgba(255,255,255,0.85)" : "#2fbf71", []);
   }
 }
 
