@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Écart pupillaire</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body data-view="setup">
+  <header class="top">
+    <span class="brand">Écart pupillaire</span>
+    <nav class="steps" aria-label="Étapes">
+      <button class="step" data-go="setup"><span>1</span>Préparer</button>
+      <button class="step" data-go="measure"><span>2</span>Mesurer</button>
+      <button class="step" data-go="results" id="stepResults" disabled><span>3</span>Résultat</button>
+    </nav>
+    <span id="status" class="status">Chargement…</span>
+  </header>
+
+  <main>
+    <!-- ÉTAPE 1 : préparation -->
+    <section class="view view-setup" data-view="setup">
+      <div class="intro">
+        <h1>Mesurons votre écart pupillaire</h1>
+        <p class="muted">La distance entre vos deux pupilles, en une minute, avec votre webcam.</p>
+      </div>
+
+      <ol class="tiles">
+        <li>
+          <svg viewBox="0 0 48 48" aria-hidden="true"><rect x="6" y="12" width="36" height="24" rx="3"/><line x1="6" y1="19" x2="42" y2="19"/><line x1="11" y1="29" x2="22" y2="29"/></svg>
+          <strong>Prenez une carte bancaire</strong>
+          <span>Ou toute carte de la même taille. <button class="link" data-pop="popCard">Lesquelles ?</button></span>
+        </li>
+        <li>
+          <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M10 40c0-14 4-28 14-28s14 14 14 28"/><rect x="15" y="15" width="18" height="11" rx="1.5"/><circle cx="19" cy="32" r="1.6"/><circle cx="29" cy="32" r="1.6"/></svg>
+          <strong>Posez-la sur le front</strong>
+          <span>À plat, juste au-dessus des sourcils, cheveux dégagés.</span>
+        </li>
+        <li>
+          <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M4 24s7-12 20-12 20 12 20 12-7 12-20 12S4 24 4 24z"/><circle cx="24" cy="24" r="6"/></svg>
+          <strong>Fixez la caméra</strong>
+          <span>Quand le bord de l'écran devient <b class="g">vert</b>, ne bougez plus jusqu'au signal sonore.</span>
+        </li>
+      </ol>
+
+      <div class="start panel">
+        <label class="distance"><span class="lbl">À quelle distance de la caméra serez-vous ? <span class="help" tabindex="0" role="button" aria-label="Aide" data-tip="Plus vous êtes loin, plus les petites erreurs d'estimation (position de la carte, convergence des yeux) diminuent. Mais trop loin, la carte devient trop petite à l'image pour être bien repérée. Avec une webcam ordinaire, 70 à 80 cm est le meilleur compromis ; avec une caméra 4K, vous pouvez aller jusqu'à 1 m.">?</span></span>
+          <span class="input-unit"><input id="distanceCm" type="number" min="20" max="200" step="1" /> cm</span>
+          <small class="muted"><b>Idéalement 70 à 80 cm</b>, un peu plus qu'un bras tendu : c'est plus précis qu'en étant proche. Mesurez au mètre ruban, de l'objectif à la carte.</small>
+        </label>
+        <details class="advanced">
+          <summary>Options avancées</summary>
+          <div class="form">
+            <label><span class="lbl">Méthode <span class="help" tabindex="0" role="button" aria-label="Aide" data-tip="Avec la carte : elle sert de règle, pour une précision d'environ ±0,5 mm. Sans carte : l'app suppose un iris de 11,7 mm de diamètre. C'est plus rapide, mais moins précis (environ ±2 mm) car la taille de l'iris varie d'une personne à l'autre.">?</span></span>
+              <select id="mode">
+                <option value="card">Avec la carte (précis)</option>
+                <option value="iris">Sans carte (approximatif)</option>
+              </select>
+            </label>
+            <label><span class="lbl">Durée de la mesure <span class="help" tabindex="0" role="button" aria-label="Aide" data-tip="Nombre de mesures prises automatiquement pendant que le contour est vert, environ 3 par seconde. Plus il y en a, plus la moyenne est stable, mais plus il faut rester immobile longtemps.">?</span></span>
+              <select id="recTarget">
+                <option value="20">Courte (20 mesures)</option>
+                <option value="40">Normale (40 mesures)</option>
+                <option value="60">Longue (60 mesures)</option>
+              </select>
+            </label>
+            <label><span class="lbl">Retrait pupilles / carte (mm) <span class="help" tabindex="0" role="button" aria-label="Aide" data-tip="Profondeur entre la carte posée sur le front et vos pupilles. Plus loin de la caméra, les pupilles paraissent un peu plus petites ; l'app compense. 12 mm convient à la plupart des visages : ne changez que si vous savez ce que vous faites.">?</span></span>
+              <input id="deltaMm" type="number" min="0" max="30" step="0.5" />
+            </label>
+            <label><span class="lbl">Pupille → centre de rotation (mm) <span class="help" tabindex="0" role="button" aria-label="Aide" data-tip="Distance entre la pupille et le point autour duquel l'œil pivote, environ 10 mm. Sert à corriger la convergence : en fixant la caméra, les yeux tournent légèrement vers l'intérieur. Valeur moyenne, rarement à modifier.">?</span></span>
+              <input id="rotMm" type="number" min="5" max="15" step="0.5" />
+            </label>
+          </div>
+          <p class="muted small">Les deux derniers réglages servent aux corrections géométriques : <button class="link" data-pop="popMath">comment le calcul est fait</button>.</p>
+        </details>
+        <button id="startBtn" class="primary big-btn">C'est parti</button>
+      </div>
+
+      <p class="muted small center">🔒 Rien n'est envoyé : tout se passe sur votre appareil.</p>
+    </section>
+
+    <!-- ÉTAPE 2 : mesure (plein écran, sans défilement) -->
+    <section class="view view-measure" data-view="measure">
+      <div class="video-wrap" id="videoWrap">
+        <video id="video" playsinline muted></video>
+        <canvas id="overlay"></canvas>
+        <div id="hud" class="hud" hidden><span id="hudMsg"></span><span id="hudCount"></span></div>
+        <div class="rec-bar"><div id="recBar"></div></div>
+        <div id="countdown" class="countdown" hidden></div>
+        <div class="cta">
+          <button id="recBtn" class="primary rec-btn" disabled>● Démarrer la mesure</button>
+          <details class="pop menu">
+            <summary class="more">Autres options</summary>
+            <div class="pop-body menu-body">
+              <button id="switchCamBtn" class="ghost" hidden>Utiliser la caméra arrière</button>
+              <button id="captureBtn" class="ghost" disabled>Prendre une photo et ajuster à la main</button>
+              <label class="button ghost">Importer une photo<input id="fileInput" type="file" accept="image/*" hidden /></label>
+              <div class="menu-info small muted">Estimation sans carte : <b id="liveVal">—</b><div id="cardDiag"></div></div>
+            </div>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <!-- Ajustement d'une photo -->
+    <section class="view view-edit" data-view="edit" id="editor">
+      <div class="editor-grid">
+        <div class="canvas-wrap"><canvas id="editCanvas"></canvas></div>
+        <aside class="side">
+          <h2>Vérifiez les repères</h2>
+          <p class="muted small">Les coins orange doivent être sur ceux de la carte, les croix rouge et bleue au centre des pupilles. Faites-les glisser si besoin.</p>
+          <canvas id="loupe" width="240" height="240"></canvas>
+          <div class="result" id="editResult"></div>
+          <div class="actions">
+            <button id="cancelBtn" class="ghost">Annuler</button>
+            <button id="addBtn" class="primary">Valider</button>
+          </div>
+          <details class="fine">
+            <summary>Ajustement fin</summary>
+            <div class="sel small">Repère : <strong id="selName">aucun</strong></div>
+            <div class="nudge">
+              <button data-dx="0" data-dy="-1" aria-label="Haut">↑</button>
+              <button data-dx="-1" data-dy="0" aria-label="Gauche">←</button>
+              <button data-dx="1" data-dy="0" aria-label="Droite">→</button>
+              <button data-dx="0" data-dy="1" aria-label="Bas">↓</button>
+              <select id="step" aria-label="Pas">
+                <option value="1">1 px</option>
+                <option value="0.25">0,25 px</option>
+              </select>
+            </div>
+            <p class="muted small">Clavier : flèches (Maj = pas fin), Tab pour changer de repère.</p>
+            <div class="card-detect" id="cardDetect">
+              <button id="detectBtn">Redétecter la carte</button>
+              <div id="cardStatus" class="small"></div>
+            </div>
+          </details>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ÉTAPE 3 : résultat -->
+    <section class="view view-results results" data-view="results" id="results">
+      <div class="hero">
+        <div class="muted">Votre écart pupillaire</div>
+        <div id="summary" class="summary"><p class="muted">Aucune mesure pour l'instant.</p></div>
+        <div class="actions center">
+          <button id="copyBtn" class="ghost" disabled>Copier</button>
+          <button id="newBtn" class="primary">Recommencer</button>
+        </div>
+      </div>
+
+      <figure id="chart" class="chart panel" hidden>
+        <div id="hist" class="hist"></div>
+        <figcaption class="muted small">Chaque point est une mesure, dans l'ordre de capture. La ligne pointillée est la moyenne, la bande pâle l'écart type.</figcaption>
+      </figure>
+
+      <details class="tech panel" id="detail" hidden>
+        <summary>Données brutes</summary>
+        <div id="techStats"></div>
+        <div class="table-wrap">
+          <table id="table">
+            <thead><tr><th>#</th><th>Source</th><th>Brut</th><th>EP loin</th><th>OD</th><th>OG</th><th>Lacet</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="actions">
+          <button id="clearBtn" class="ghost" disabled>Effacer les mesures</button>
+          <button id="backBtn" class="ghost">Ajouter des mesures</button>
+        </div>
+      </details>
+
+      <section id="history" class="history panel" hidden>
+        <div class="history-head">
+          <h2>Vos essais</h2>
+          <button id="histReset" class="ghost">Réinitialiser</button>
+        </div>
+        <div id="histSummary"></div>
+        <div class="table-wrap">
+          <table class="history-table">
+            <thead><tr><th>Essai</th><th>Heure</th><th>Écart</th><th>Œil D / G</th><th>Distance</th><th>Mesures</th></tr></thead>
+            <tbody id="histBody"></tbody>
+          </table>
+        </div>
+        <p class="muted small">Conservé pendant la session du navigateur : effacé à la fermeture de l'onglet.</p>
+      </section>
+      <p class="muted small center">Mesure indicative. Pour une ordonnance, un opticien peut la confirmer.</p>
+    </section>
+  </main>
+
+  <!-- fenêtres d'aide -->
+  <dialog id="popCard" class="dialog">
+    <h2>Quelle carte utiliser ?</h2>
+    <div class="card-spec">
+      <svg viewBox="0 0 120 80" aria-hidden="true"><rect x="10" y="10" width="85.6" height="53.98" rx="3.2" /><text x="52.8" y="7" text-anchor="middle">85,60 mm</text><text x="104" y="37" text-anchor="middle" transform="rotate(90 104 37)">53,98 mm</text></svg>
+      <p>Toute carte au format standard <b>85,60 × 53,98 mm</b> : carte bancaire, vitale, de fidélité, de transport, permis de conduire, carte d'identité récente.</p>
+    </div>
+    <p class="muted">Évitez les cartes de visite (légèrement différentes), et les cartes pliées ou cornées. Une carte qui contraste avec votre peau est plus facile à repérer. Vous pouvez cacher les numéros.</p>
+    <form method="dialog"><button class="primary">Compris</button></form>
+  </dialog>
+
+  <dialog id="popMath" class="dialog">
+    <h2>Comment le calcul est fait</h2>
+    <p>La carte sert de règle : ses 85,60 mm donnent l'échelle de l'image. Mais la caméra ne « voit » pas vos pupilles à l'endroit de la carte : elle les voit le long des lignes de visée, projetées sur la carte.</p>
+    <figure class="figure">
+      <svg class="geo" viewBox="0 0 360 302" role="img" aria-label="Vue de dessus : yeux, carte posée sur le front et caméra, avec les lignes de visée">
+      <!-- EP de loin : écart entre les centres de rotation -->
+      <g class="dim">
+        <line x1="85.5" y1="14" x2="274.5" y2="14"/><line x1="85.5" y1="9" x2="85.5" y2="19"/><line x1="274.5" y1="9" x2="274.5" y2="19"/>
+      </g>
+      <text class="lab strong" x="180" y="9" text-anchor="middle">EP de loin</text>
+      <!-- globes oculaires -->
+      <circle class="eye" cx="85.5" cy="50" r="32.7"/>
+      <circle class="eye" cx="274.5" cy="50" r="32.7"/>
+      <line class="guide" x1="85.5" y1="14" x2="85.5" y2="50"/>
+      <line class="guide" x1="274.5" y1="14" x2="274.5" y2="50"/>
+      <!-- lignes de visée vers la caméra -->
+      <line class="ray" x1="85.5" y1="50" x2="180" y2="270"/>
+      <line class="ray" x1="274.5" y1="50" x2="180" y2="270"/>
+      <circle class="ctr" cx="85.5" cy="50" r="2.5"/>
+      <circle class="ctr" cx="274.5" cy="50" r="2.5"/>
+      <circle class="pupil" cx="98.4" cy="80" r="4"/>
+      <circle class="pupil" cx="261.6" cy="80" r="4"/>
+      <!-- carte sur le front -->
+      <line class="card" x1="51.6" y1="116" x2="308.4" y2="116"/>
+      <text class="lab card-t" x="313" y="120">carte</text>
+      <circle class="proj" cx="113.85" cy="116" r="3"/>
+      <circle class="proj" cx="246.15" cy="116" r="3"/>
+      <g class="dim acc">
+        <line x1="113.85" y1="132" x2="246.15" y2="132"/><line x1="113.85" y1="127" x2="113.85" y2="137"/><line x1="246.15" y1="127" x2="246.15" y2="137"/>
+      </g>
+      <text class="lab acc" x="180" y="148" text-anchor="middle">mesure brute</text>
+      <!-- coupure : la distance D est raccourcie -->
+      <rect class="cut" x="30" y="180" width="330" height="16"/>
+      <path class="cutline" d="M30 180 q 7 -4 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0"/>
+      <path class="cutline" d="M30 196 q 7 -4 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0 t 14 0"/>
+      <!-- caméra -->
+      <rect class="cam" x="166" y="270" width="28" height="15" rx="3"/>
+      <circle class="cam-lens" cx="180" cy="270" r="5"/>
+      <text class="lab" x="180" y="299" text-anchor="middle">caméra</text>
+      <!-- axe des profondeurs -->
+      <g class="axis">
+        <line x1="16" y1="50" x2="16" y2="182"/><line x1="16" y1="194" x2="16" y2="270"/>
+        <line x1="11" y1="50" x2="21" y2="50"/><line x1="11" y1="80" x2="21" y2="80"/><line x1="11" y1="116" x2="21" y2="116"/><line x1="11" y1="270" x2="21" y2="270"/>
+        <line x1="11" y1="186" x2="21" y2="180"/><line x1="11" y1="192" x2="21" y2="186"/>
+      </g>
+      <text class="lab sym" x="22" y="69">r</text>
+      <text class="lab sym" x="22" y="102">δ</text>
+      <text class="lab sym" x="22" y="236">D</text>
+    </svg>
+      <figcaption class="legend small">
+        <span><i class="lg-pupil"></i>pupille</span>
+        <span><i class="lg-ctr"></i>centre de rotation de l'œil</span>
+        <span><i class="lg-proj"></i>pupille vue sur la carte</span>
+        <span><i class="lg-ray"></i>ligne de visée</span>
+      </figcaption>
+    </figure>
+    <p class="formula">EP de loin = mesure brute × <span class="frac"><span>D + δ + r</span><span>D</span></span></p>
+    <ul class="small">
+      <li><b>D</b> : distance caméra → carte (celle que vous saisissez).</li>
+      <li><b>δ</b> : retrait des pupilles derrière la carte (12 mm) : corrige la parallaxe.</li>
+      <li><b>r</b> : pupille → centre de rotation de l'œil (10 mm) : corrige la convergence vers l'objectif.</li>
+    </ul>
+    <p class="muted small">Vue de dessus, à l'échelle sauf la distance D, raccourcie environ 10 fois (coupure ≈). En réalité les lignes de visée sont presque parallèles et la correction ne fait qu'environ +4 %. Sur ce schéma, la formule tombe juste : 132 px × (154 + 36 + 30) / 154 = 189 px.</p>
+    <form method="dialog"><button class="primary">Fermer</button></form>
+  </dialog>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
