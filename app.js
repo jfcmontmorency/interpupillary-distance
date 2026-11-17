@@ -358,7 +358,9 @@ function measureLive(a) {
     t: a.t3,
     yaw: a.yaw,
     // distance caméra → carte : focale (px) × mm par px
-    D: settings.mode === "card" && camCal?.f ? camCal.f * mmPerPx : null,
+    // distance figée au moment de la mesure : mesurée (caméra calibrée) ou saisie ; changer le
+    // réglage ensuite ne doit pas réécrire les mesures déjà prises
+    ...measDistance(settings.mode === "card" && camCal?.f ? camCal.f * mmPerPx : null),
   };
 }
 
@@ -1104,8 +1106,13 @@ function computeEditor() {
   const u = sub(m.og, m.od);
   // part du nez mesurée sur les repères, corrigée de la rotation de la tête (estimée en 3D)
   const t = clamp(dot(sub(m.bridge, m.od), u) / dot(u, u) + (pose ? pose.tCorr : 0), 0, 1);
-  const D = mode === "card" && cal?.f ? cal.f * mmPerPx : null;
-  return { mode, raw, t, yaw: pose ? pose.yaw : null, warnings, D };
+  const { D, Dauto } = measDistance(mode === "card" && cal?.f ? cal.f * mmPerPx : null);
+  return { mode, raw, t, yaw: pose ? pose.yaw : null, warnings, D, Dauto };
+}
+
+/** Distance à enregistrer avec une mesure : mesurée si disponible, sinon celle saisie à cet instant. */
+function measDistance(measured) {
+  return measured ? { D: measured, Dauto: true } : { D: settings.distanceCm * 10, Dauto: false };
 }
 
 function derive(meas) {
@@ -1123,7 +1130,7 @@ function updateEditResult() {
     <div class="big">${fmt(d.far, 1)} mm</div>
     <div>Œil droit ${fmt(d.odMono)} · œil gauche ${fmt(d.ogMono)} mm</div>
     ${r.warnings.map((w) => `<p class="warn">${w}</p>`).join("")}
-    <div class="muted small">Mesure brute ${fmt(r.raw, 2)} mm × correction ${fmt(farFactor(r.mode, r.D), 4)}${r.D ? ` · distance mesurée ${fmt(r.D / 10, 0)} cm` : ""}</div>`;
+    <div class="muted small">Mesure brute ${fmt(r.raw, 2)} mm × correction ${fmt(farFactor(r.mode, r.D), 4)}${r.Dauto ? ` · distance mesurée ${fmt(r.D / 10, 0)} cm` : ""}</div>`;
 }
 
 $("#addBtn").addEventListener("click", () => {
@@ -1259,9 +1266,11 @@ function renderResults(animate = false) {
   const near = nearFromFar(far.mean);
   // l'essai en cours est enregistré (ou mis à jour) dans l'historique de session
   seriesId ??= Date.now();
-  const Ds = measurements.map((m) => m.D).filter(Boolean);
-  const Dmean = Ds.length ? Ds.reduce((acc, v) => acc + v, 0) / Ds.length : null;
-  upsertHistory({ id: seriesId, mean: far.mean, sd: far.sd, n: far.n, od: odS.mean, og: ogS.mean, dist: Dmean ? Math.round(Dmean / 10) : settings.distanceCm, auto: !!Dmean, mode: settings.mode });
+  // distance de l'essai = celle de ses mesures (anciennes mesures sans distance : réglage actuel)
+  const Ds = measurements.map((m) => m.D || settings.distanceCm * 10);
+  const Dmean = Ds.reduce((acc, v) => acc + v, 0) / Ds.length;
+  const Dauto = measurements.some((m) => m.Dauto);
+  upsertHistory({ id: seriesId, mean: far.mean, sd: far.sd, n: far.n, od: odS.mean, og: ogS.mean, dist: Math.round(Dmean / 10), auto: Dauto, mode: measurements[0].mode });
   renderHistory();
   // Résultat principal : avec plusieurs essais, la moyenne des essais (plus fiable qu'un seul,
   // car chaque essai a son petit biais : position de la carte, de la tête…)
@@ -1297,7 +1306,7 @@ function renderResults(animate = false) {
       <div><span>IC 95 % de cet essai</span>${far.n > 1 ? "± " + fmt(far.ci, 2) + " mm" : "—"}</div>
       <div><span>Écart-type</span>${far.n > 1 ? fmt(far.sd, 2) + " mm" : "—"}</div>
       <div><span>Médiane</span>${fmt(far.med, 2)} mm</div>
-      <div><span>Distance caméra</span>${Dmean ? fmt(Dmean / 10, 1) + " cm (mesurée)" : settings.distanceCm + " cm (saisie)"}</div>
+      <div><span>Distance caméra</span>${fmt(Dmean / 10, 0)} cm (${Dauto ? "mesurée" : "saisie"})</div>
       <div><span>EP de près, lecture à ${NEAR_CM} cm</span>${fmt(near, 2)} mm</div>
     </div>
     <p class="muted small">Valeurs aberrantes écartées au-delà de 3 écarts absolus médians. L'intervalle de confiance de l'essai ne couvre que la variation entre ses mesures ; chaque essai a en plus un petit biais propre (position de la carte et de la tête), d'où l'intérêt de faire la moyenne de plusieurs essais.</p>`;
