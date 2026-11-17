@@ -34,7 +34,7 @@
         <li>
           <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M10 40c0-14 4-28 14-28s14 14 14 28"/><rect x="15" y="15" width="18" height="11" rx="1.5"/><circle cx="19" cy="32" r="1.6"/><circle cx="29" cy="32" r="1.6"/></svg>
           <strong>Posez-la sur le front</strong>
-          <span>À plat, juste au-dessus des sourcils, cheveux dégagés.</span>
+          <span>Juste au-dessus des sourcils, cheveux dégagés. Astuce : un bout de ruban adhésif la tient en place.</span>
         </li>
         <li>
           <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M4 24s7-12 20-12 20 12 20 12-7 12-20 12S4 24 4 24z"/><circle cx="24" cy="24" r="6"/></svg>
@@ -48,11 +48,6 @@
           <span class="input-unit"><input id="distanceCm" type="number" min="20" max="200" step="1" /> cm</span>
           <small class="muted"><b>Idéalement 70 à 80 cm</b>, un peu plus qu'un bras tendu : c'est plus précis qu'en étant proche. Mesurez au mètre ruban, de l'objectif à la carte.</small>
         </label>
-        <div class="calib-row">
-          <span id="calibInfo" class="muted small"></span>
-          <button id="calibStartBtn" class="ghost">Calibrer ma caméra</button>
-          <span class="help" tabindex="0" role="button" aria-label="Aide" data-tip="Tenez la carte par ses petits côtés, placez-la au centre, puis bougez-la librement : vers les 4 coins de l'image, en la faisant pivoter et basculer. L'app capture d'elle-même chaque nouvelle position (bip). Elle en déduit la déformation de l'objectif et sa focale : les mesures sont ensuite corrigées et la distance est mesurée automatiquement. À faire une fois par caméra, environ 30 secondes.">?</span>
-        </div>
         <details class="advanced">
           <summary>Options avancées</summary>
           <div class="form">
@@ -99,7 +94,7 @@
             <summary class="more">Autres options</summary>
             <div class="pop-body menu-body">
               <button id="switchCamBtn" class="ghost" hidden>Utiliser la caméra arrière</button>
-              <button id="calibBtn" class="ghost">Calibrer cette caméra</button>
+              <button id="calibBtn" class="ghost">Calibrer cette caméra (expérimental)</button>
               <button id="captureBtn" class="ghost" disabled>Prendre une photo et ajuster à la main</button>
               <label class="button ghost">Importer une photo<input id="fileInput" type="file" accept="image/*" hidden /></label>
               <div class="menu-info small muted">Estimation sans carte : <b id="liveVal">—</b><div id="cardDiag"></div></div>

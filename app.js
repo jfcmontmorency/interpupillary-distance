@@ -140,7 +140,10 @@ function cardScale(c) {
   const k = tilt < 0.003 ? (kW * CARD_W + kH * CARD_H) / (CARD_W + CARD_H) : hi;
   return { mmPerPx: 1 / k, tilt, tiltDeg: deg(Math.acos(1 - tilt)) };
 }
-const MAX_CARD_TILT = 0.034; // ≈ 15° : au-delà la carte n'est plus assez à plat
+// Le front est incliné vers l'arrière (souvent 10–20°) : une carte posée dessus paraît moins haute.
+// L'échelle tirée de la dimension non raccourcie corrige ce cas ; on ne rejette qu'au-delà de ≈ 30°.
+const MAX_CARD_TILT = 0.14;
+const CARD_ASPECT_TOL = 0.15; // tolérance sur les proportions apparentes (carte inclinée sur le front)
 
 function irisEstimate(a) {
   const raw = (dist(a.od.center, a.og.center) / ((a.od.diam + a.og.diam) / 2)) * IRIS_D;
@@ -426,8 +429,9 @@ function cardError(r, expectedW = null) {
   if (r.error) return r.error;
   const [a, b, c, d] = r.corners;
   const aspectErr = cardWidth(r.corners) / ((dist(a, d) + dist(b, c)) / 2) / (CARD_W / CARD_H) - 1;
-  if (Math.abs(aspectErr) > 0.04) return `proportions incohérentes (${fmt(aspectErr * 100)} %)`;
-  if (r.coverage < 0.6) return "bords trop peu visibles ou pas rectilignes";
+  if (Math.abs(aspectErr) > CARD_ASPECT_TOL) return `proportions incohérentes (${fmt(aspectErr * 100)} %)`;
+  // 50 % : un doigt peut couvrir une partie d'un bord
+  if (r.coverage < 0.5) return "bords trop peu visibles ou pas rectilignes";
   if (r.maxRms > 0.8) return "bords pas assez rectilignes (cheveux, sourcils ?)";
   if (expectedW) {
     const ratio = cardWidth(r.corners) / expectedW;
@@ -457,7 +461,7 @@ const expectedCardW = (a) => (a && irisSmooth ? (irisSmooth / IRIS_D) * CARD_W :
 function findCard(gray, guesses, expectedW = null) {
   let lastErr = "carte introuvable";
   for (const g of guesses) {
-    const r = refineCard(gray, g.corners, Math.max(8, g.frac * cardWidth(g.corners)));
+    const r = refineCard(gray, g.corners, Math.max(8, g.frac * cardWidth(g.corners)), { aspectTol: CARD_ASPECT_TOL });
     const err = cardError(r, expectedW);
     if (!err) return r;
     lastErr = err;
@@ -638,6 +642,7 @@ function refreshCamCal() {
   updateCalibInfo();
 }
 function updateCalibInfo() {
+  if (!$("#calibInfo")) return; // ligne retirée de l'étape 1 (calibration expérimentale)
   const n = Object.keys(loadCals()).length;
   $("#calibInfo").innerHTML = n
     ? "✓ Caméra calibrée sur cet appareil : la distance sera mesurée automatiquement."
@@ -833,7 +838,7 @@ function finishCalibration() {
 
 $("#calibBtn").addEventListener("click", startCalibration);
 $("#calibCancelBtn").addEventListener("click", stopCalibration);
-$("#calibStartBtn").addEventListener("click", () => {
+$("#calibStartBtn")?.addEventListener("click", () => {
   setView("measure");
   startCalibration();
 });
